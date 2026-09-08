@@ -168,7 +168,8 @@ schtasks /Delete /TN "AgenteINLABS_BuscaNome" /F
   abre no navegador (dois cliques), com o nome destacado em amarelo dentro
   do texto e tema claro/escuro automático.
 - **Notificação do Windows** — aparece automaticamente só quando há
-  ocorrência, com som de alerta.
+  ocorrência, com som de alerta e **fica fixa na tela até você clicar para
+  dispensar** (não some sozinha).
 - **`downloads/`** — pasta de trabalho temporária; fica vazia entre
   execuções (os arquivos baixados do INLABS são apagados ao final).
 
