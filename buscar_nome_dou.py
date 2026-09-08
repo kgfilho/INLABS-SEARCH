@@ -285,7 +285,16 @@ def gerar_relatorio_html(data_completa: str, ocorrencias: list[dict]) -> Path:
 
 def notificar_windows(titulo: str, mensagem: str):
     try:
+        import winotify
         from winotify import Notification, audio
+
+        # scenario="reminder" faz a notificação ficar fixa na tela até o
+        # usuário clicar em dispensar, em vez de sumir sozinha
+        if 'scenario="reminder"' not in winotify.TEMPLATE:
+            winotify.TEMPLATE = winotify.TEMPLATE.replace(
+                '<toast {launch} duration="{duration}">',
+                '<toast {launch} duration="{duration}" scenario="reminder">',
+            )
 
         toast = Notification(
             app_id="Agente INLABS",
