@@ -1,0 +1,35 @@
+MIT License
+
+Copyright (c) 2026 Kleber José Araújo Galvão Filho
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+NOTA IMPORTANTE SOBRE ORIGEM DO CÓDIGO:
+
+As funções de login e download ("login()" e "baixar_secoes()" em
+buscar_nome_dou.py) são baseadas no script de exemplo oficial disponibilizado
+pela Imprensa Nacional em https://github.com/Imprensa-Nacional/inlabs. Esse
+repositório de origem não possui licença declarada pelo autor. A licença MIT
+acima se aplica ao trabalho autoral original deste projeto (busca, relatórios,
+notificações, automação); ela NÃO concede, por si só, uma licença sobre o
+trecho de origem além do que a lei já permitir (ex.: uso e adaptação de
+pequenos exemplos de código publicados publicamente pela própria entidade que
+os disponibilizou para esse fim).
