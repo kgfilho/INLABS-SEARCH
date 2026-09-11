@@ -66,11 +66,12 @@ def login(sessao: requests.Session) -> str:
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    sessao.request("POST", URL_LOGIN, data=payload, headers=headers)
+    sessao.request("POST", URL_LOGIN, data=payload, headers=headers, timeout=30)
     cookie = sessao.cookies.get("inlabs_session_cookie")
     if not cookie:
         raise RuntimeError(
-            "Falha ao obter cookie de sessão do INLABS. Verifique email/senha em config.py."
+            "Falha ao obter cookie de sessão do INLABS. Verifique email/senha em config.py "
+            "(ou o site pode estar em manutenção — tente de novo mais tarde)."
         )
     return cookie
 
@@ -82,7 +83,11 @@ def baixar_secoes(sessao: requests.Session, cookie: str, data_completa: str, des
         nome_arquivo = f"{data_completa}-{secao}.zip"
         url = URL_DOWNLOAD + data_completa + "&dl=" + nome_arquivo
         headers = {"Cookie": f"inlabs_session_cookie={cookie}", "origem": "736372697074"}
-        resposta = sessao.get(url, headers=headers)
+        try:
+            resposta = sessao.get(url, headers=headers, timeout=60)
+        except requests.exceptions.RequestException as exc:
+            print(f"Erro de conexão ao baixar {secao} ({data_completa}): {exc}")
+            continue
         if resposta.status_code == 200 and resposta.content[:2] == b"PK":
             caminho_zip = destino / nome_arquivo
             caminho_zip.write_bytes(resposta.content)
@@ -283,6 +288,16 @@ def gerar_relatorio_html(data_completa: str, ocorrencias: list[dict]) -> Path:
     return caminho_relatorio
 
 
+def registrar_falha(motivo: str) -> Path:
+    """Registra uma falha de execução num log único (não sobrescreve relatórios de dias)."""
+    RELATORIOS_DIR.mkdir(parents=True, exist_ok=True)
+    caminho = RELATORIOS_DIR / "falhas.log"
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with caminho.open("a", encoding="utf-8") as f:
+        f.write(f"[{agora}] {motivo}\n")
+    return caminho
+
+
 def notificar_windows(titulo: str, mensagem: str):
     try:
         import winotify
@@ -311,9 +326,18 @@ def notificar_windows(titulo: str, mensagem: str):
 
 
 def processar_dia(sessao: requests.Session, cookie: str, data_completa: str) -> list[dict]:
-    """Baixa, varre e gera o relatório de um único dia. Retorna as ocorrências encontradas."""
+    """Baixa, varre e gera o relatório de um único dia. Retorna as ocorrências encontradas.
+
+    Erros inesperados aqui (zip corrompido, etc.) não derrubam o processamento
+    dos outros dias de um intervalo — ficam registrados em falhas.log."""
     destino_dia = DOWNLOADS_DIR / data_completa
-    arquivos = baixar_secoes(sessao, cookie, data_completa, destino_dia)
+    try:
+        arquivos = baixar_secoes(sessao, cookie, data_completa, destino_dia)
+    except requests.exceptions.RequestException as exc:
+        registrar_falha(f"[{data_completa}] falha de conexão ao baixar seções: {exc}")
+        print(f"[{data_completa}] Falha de conexão, pulando este dia.")
+        shutil.rmtree(destino_dia, ignore_errors=True)
+        return []
 
     if not arquivos:
         print(f"[{data_completa}] Nenhum arquivo disponível (sem edição publicada nesse dia).")
@@ -326,7 +350,11 @@ def processar_dia(sessao: requests.Session, cookie: str, data_completa: str) -> 
     for caminho_zip in arquivos:
         secao = caminho_zip.stem.split("-")[-1]
         print(f"[{data_completa}] Varrendo {caminho_zip.name}...")
-        todas_ocorrencias.extend(buscar_em_zip(caminho_zip, secao))
+        try:
+            todas_ocorrencias.extend(buscar_em_zip(caminho_zip, secao))
+        except zipfile.BadZipFile as exc:
+            registrar_falha(f"[{data_completa}] arquivo {caminho_zip.name} corrompido/incompleto: {exc}")
+            print(f"[{data_completa}] Aviso: {caminho_zip.name} parece corrompido, pulando esse arquivo.")
 
     relatorio = gerar_relatorio(data_completa, todas_ocorrencias)
     relatorio_html = gerar_relatorio_html(data_completa, todas_ocorrencias)
@@ -356,7 +384,14 @@ def intervalo_de_datas(data_inicio: str, data_fim: str) -> list[str]:
     return dias
 
 
+def ja_verificado_hoje(data_completa: str) -> bool:
+    """Já existe relatório de sucesso para essa data (gerado só quando o dia foi processado)."""
+    return (RELATORIOS_DIR / f"{data_completa}.txt").exists()
+
+
 def main():
+    execucao_automatica_diaria = len(sys.argv) == 1
+
     if len(sys.argv) >= 3:
         datas = intervalo_de_datas(sys.argv[1], sys.argv[2])
         print(f"Buscando no intervalo de {datas[0]} até {datas[-1]} ({len(datas)} dia(s))...")
@@ -365,9 +400,22 @@ def main():
     else:
         datas = [date.today().strftime("%Y-%m-%d")]
 
+    if execucao_automatica_diaria and ja_verificado_hoje(datas[0]):
+        print(f"Já verificado hoje ({datas[0]}) com sucesso — nada a fazer.")
+        return
+
     sessao = requests.Session()
     print(f"Autenticando no INLABS como {INLABS_EMAIL}...")
-    cookie = login(sessao)
+    try:
+        cookie = login(sessao)
+    except requests.exceptions.RequestException as exc:
+        registrar_falha(f"falha de conexão ao fazer login ({type(exc).__name__}: {exc})")
+        print(f"Falha de conexão ao fazer login: {exc}")
+        return
+    except RuntimeError as exc:
+        registrar_falha(str(exc))
+        print(str(exc))
+        return
 
     ocorrencias_por_dia = {}
     for data_completa in datas:
@@ -396,4 +444,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # rede de segurança: nunca falhar em silêncio total
+        import traceback
+
+        traceback.print_exc()
+        try:
+            registrar_falha(f"erro inesperado ({type(exc).__name__}: {exc})")
+        except Exception:
+            pass  # se até o log falhar, não há mais nada a fazer

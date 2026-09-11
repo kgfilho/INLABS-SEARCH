@@ -5,7 +5,9 @@ Script que baixa as edições do Diário Oficial da União (via
 publicadas e avisa quando encontra o(s) nome(s) configurado(s) — com
 notificação do Windows e um relatório detalhado.
 
-Feito para rodar sozinho, todo dia, sem precisar abrir nada manualmente.
+Feito para rodar sozinho, todo dia, sem precisar abrir nada manualmente —
+com nova tentativa automática se algo falhar (sem internet, site fora do
+ar etc.).
 
 ---
 
@@ -27,7 +29,10 @@ Feito para rodar sozinho, todo dia, sem precisar abrir nada manualmente.
 
 ## Como funciona
 
-A cada execução, o script:
+A cada execução automática (sem data específica), o script primeiro
+verifica **se já tem um relatório de hoje com sucesso** — se tiver, encerra
+na hora, sem tentar conectar em nada (evita reprocessar à toa, já que a
+tarefa roda de hora em hora). Se ainda não tiver:
 
 1. Faz login no INLABS com o e-mail/senha do seu `.env`.
 2. Baixa as seções do Diário Oficial do dia (ex.: DO1, DO2, DO3).
@@ -40,6 +45,11 @@ A cada execução, o script:
 5. Se não achar nada, só salva o relatório (sem notificação) e encerra
    silenciosamente.
 6. Apaga os arquivos baixados ao final — só o relatório fica guardado.
+
+Se falhar (sem internet, INLABS fora do ar, etc.), nada é salvo como
+"sucesso de hoje" — então a próxima execução (1h depois) tenta de novo
+automaticamente, até dar certo. Veja mais em
+[Solução de problemas](#solução-de-problemas).
 
 ## Instalação (primeira vez)
 
@@ -117,19 +127,36 @@ Duas automações independentes, que podem ser usadas juntas ou separadas.
 **Basta dar dois cliques** nos arquivos `.bat` abaixo — nenhum precisa ser
 executado como Administrador.
 
-### 1. Rodar todo dia em um horário fixo
+### 1. Rodar periodicamente, com nova tentativa automática
 
 | Arquivo | O que faz |
 |---|---|
 | [`configurar_horario.bat`](configurar_horario.bat) | Menu para **configurar/alterar** o horário diário ou **remover** o agendamento |
 
-Ao rodar, escolha:
-- **[1]** para definir o horário (formato `HH:MM`, ex.: `05:00`)
-- **[2]** para remover o agendamento diário
-- **[3]** para sair sem mexer em nada
+Por padrão a tarefa `AgenteINLABS_BuscaNome` roda **de hora em hora** (não
+só uma vez por dia). Isso não significa 24 downloads por dia: o script
+verifica, no início de cada execução automática, se **já tem um relatório
+de hoje com sucesso** — se já tiver, ele nem tenta logar de novo, só
+encerra na hora. Ou seja, na prática:
 
-Por baixo dos panos, isso cria/remove uma tarefa chamada
-`AgenteINLABS_BuscaNome` no **Agendador de Tarefas do Windows**.
+- Se a primeira tentativa do dia der certo, ele fica quieto o resto do dia.
+- Se falhar (ex.: sem internet no momento em que o PC ligou), ele **tenta
+  de novo automaticamente na próxima hora**, e assim por diante, até
+  conseguir.
+
+Isso resolve o caso comum de "internet caiu bem na hora que o PC ligou,
+voltou minutos depois" sem precisar de nenhuma ação manual.
+
+Pra mudar a frequência de tentativa (não recomendado descer de 1h), edite
+direto no Agendador de Tarefas ou recrie via linha de comando:
+
+```bash
+schtasks /Create /TN "AgenteINLABS_BuscaNome" /TR "\"C:\caminho\para\pythonw.exe\" \"C:\caminho\para\buscar_nome_dou.py\"" /SC HOURLY /MO 1 /F
+```
+
+> A opção `[1]` do `configurar_horario.bat` ainda existe caso você prefira
+> voltar para um horário fixo único por dia em vez do esquema de hora em
+> hora com nova tentativa.
 
 ### 2. Rodar ao ligar/logar no computador
 
@@ -202,9 +229,21 @@ INLABS-SEARCH/
 
 ## Solução de problemas
 
+### Sem internet ou site fora do ar
+
+O script foi pensado pra nunca travar/crashar sem deixar rastro: se não
+houver conexão (ou o INLABS estiver em manutenção) no momento da execução
+automática, ele registra o motivo em `relatorios/falhas.log` e encerra
+normalmente — sem notificação de alarme falso, sem relatório de dia
+incompleto. Como a tarefa roda de hora em hora e só "desiste" quando já
+teve sucesso naquele dia, ele **tenta de novo automaticamente na próxima
+hora**, sem precisar de nenhuma ação manual. Se só uma seção (DO1/DO2/DO3)
+falhar por conexão, as outras continuam sendo verificadas normalmente.
+
 **"Falha ao obter cookie de sessão do INLABS"**
 E-mail ou senha errados no `.env`. Confira em https://inlabs.in.gov.br se o
-login funciona pelo navegador.
+login funciona pelo navegador. (Também aparece se o site estiver em
+manutenção — nesse caso é só tentar mais tarde.)
 
 **"NOMES_BUSCA não configurado no .env"**
 Faltou preencher `NOMES_BUSCA` no `.env` (ou o arquivo `.env` não existe —
