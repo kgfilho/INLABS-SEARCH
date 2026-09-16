@@ -46,3 +46,19 @@ if not NOMES_BUSCA:
 # Opções: DO1 DO2 DO3 DO1E DO2E DO3E
 _SECOES_DOU_RAW = os.environ.get("SECOES_DOU", "DO1 DO2 DO3")
 SECOES_DOU = _SECOES_DOU_RAW.split()
+
+# Checagem opcional e independente: além de buscar NOMES_BUSCA em qualquer
+# publicação, também avisa quando aparece uma convocação/nomeação de um
+# órgão específico (ex.: IFAM) — de qualquer candidato, não só o seu nome.
+# Deixe ORGAOS_BUSCA vazio no .env para desativar essa checagem.
+_ORGAOS_BUSCA_RAW = os.environ.get(
+    "ORGAOS_BUSCA",
+    "INSTITUTO FEDERAL DE EDUCACAO, CIENCIA E TECNOLOGIA DO AMAZONAS;IFAM",
+)
+ORGAOS_BUSCA = [t.strip() for t in _ORGAOS_BUSCA_RAW.split(";") if t.strip()]
+
+_TIPOS_ATO_RAW = os.environ.get("TIPOS_ATO", "NOMEAR;NOMEACAO;CONVOCACAO;CONVOCA")
+TIPOS_ATO = [t.strip() for t in _TIPOS_ATO_RAW.split(";") if t.strip()]
+
+# A checagem de convocações só roda se houver órgão E tipo de ato configurados.
+CONVOCACOES_ATIVADO = bool(ORGAOS_BUSCA) and bool(TIPOS_ATO)

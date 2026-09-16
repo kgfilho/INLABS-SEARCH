@@ -1,9 +1,19 @@
-# Agente INLABS — Busca de Nome no Diário Oficial
+# Agente INLABS — Busca de Nome e Convocações no Diário Oficial
 
 Script que baixa as edições do Diário Oficial da União (via
-[INLABS](https://inlabs.in.gov.br)), varre o texto de **todas** as matérias
-publicadas e avisa quando encontra o(s) nome(s) configurado(s) — com
-notificação do Windows e um relatório detalhado.
+[INLABS](https://inlabs.in.gov.br)) e faz **duas checagens independentes**
+sobre o mesmo conteúdo baixado — um único login/download serve para as
+duas, evitando bater duas vezes no INLABS à toa:
+
+1. **Busca por nome**: varre o texto de todas as matérias e avisa quando
+   encontra o(s) nome(s) configurado(s).
+2. **Convocações/nomeações de um órgão** *(opcional)*: avisa quando sai
+   uma convocação ou nomeação de um órgão específico (ex.: IFAM) — de
+   **qualquer** candidato, não só o seu nome. Desativa sozinha se você não
+   configurar `ORGAOS_BUSCA`/`TIPOS_ATO`.
+
+Cada checagem tem seu próprio relatório e notificação, isolados um do
+outro (um erro numa não afeta a outra).
 
 Feito para rodar sozinho, todo dia, sem precisar abrir nada manualmente —
 com nova tentativa automática se algo falhar (sem internet, site fora do
@@ -36,15 +46,18 @@ tarefa roda de hora em hora). Se ainda não tiver:
 
 1. Faz login no INLABS com o e-mail/senha do seu `.env`.
 2. Baixa as seções do Diário Oficial do dia (ex.: DO1, DO2, DO3).
-3. Abre cada matéria publicada e procura o(s) nome(s) configurado(s) —
-   a busca ignora acentuação e maiúsculas/minúsculas (ex.: "José" e "JOSE"
-   são tratados como iguais).
-4. Se achar alguma ocorrência:
-   - dispara uma **notificação do Windows**;
-   - salva um **relatório** com o trecho do texto onde o nome aparece.
-5. Se não achar nada, só salva o relatório (sem notificação) e encerra
-   silenciosamente.
-6. Apaga os arquivos baixados ao final — só o relatório fica guardado.
+3. Abre cada matéria publicada **uma única vez** e roda as duas checagens
+   sobre o mesmo texto: nome (`NOMES_BUSCA`) e, se ativado, convocação/
+   nomeação de órgão (`ORGAOS_BUSCA` + `TIPOS_ATO`) — a busca ignora
+   acentuação e maiúsculas/minúsculas (ex.: "José" e "JOSE" são tratados
+   como iguais).
+4. Para cada checagem que encontrar alguma ocorrência:
+   - dispara uma **notificação do Windows** própria;
+   - salva um **relatório** próprio (`relatorios/nome/` ou
+     `relatorios/convocacoes/`).
+5. Se não achar nada numa checagem, só salva o relatório dela (sem
+   notificação) e segue em frente.
+6. Apaga os arquivos baixados ao final — só os relatórios ficam guardados.
 
 Se falhar (sem internet, INLABS fora do ar, etc.), nada é salvo como
 "sucesso de hoje" — então a próxima execução (1h depois) tenta de novo
@@ -87,6 +100,12 @@ NOMES_BUSCA=SEU NOME COMPLETO
 # Seções do DOU a varrer, separadas por espaço.
 # Opções: DO1 DO2 DO3 DO1E DO2E DO3E
 SECOES_DOU=DO1 DO2 DO3
+
+# Checagem extra e OPCIONAL: avisa quando sai uma convocação/nomeação de um
+# órgão específico (de QUALQUER candidato, não só o seu nome). Deixe os
+# dois vazios pra desativar essa checagem.
+ORGAOS_BUSCA=INSTITUTO FEDERAL DE EDUCACAO, CIENCIA E TECNOLOGIA DO AMAZONAS;IFAM
+TIPOS_ATO=NOMEAR;NOMEACAO;CONVOCACAO;CONVOCA
 ```
 
 | Variável | O que é | Exemplo |
@@ -95,10 +114,17 @@ SECOES_DOU=DO1 DO2 DO3
 | `INLABS_SENHA` | Senha do INLABS | `minhaSenha123` |
 | `NOMES_BUSCA` | Nome(s) a buscar no texto, separados por `;` | `JOAO DA SILVA;J. DA SILVA` |
 | `SECOES_DOU` | Seções a baixar, separadas por espaço | `DO1 DO2 DO3` |
+| `ORGAOS_BUSCA` *(opcional)* | Termos de órgão para a checagem de convocações, separados por `;` | `IFAM;INSTITUTO FEDERAL...` |
+| `TIPOS_ATO` *(opcional)* | Termos de tipo de ato para a checagem de convocações, separados por `;` | `NOMEAR;CONVOCACAO` |
 
 > Seções comuns: **DO1/DO2/DO3** são as edições normais das Seções 1, 2 e 3.
 > **DO1E/DO2E/DO3E** são as edições extras. A Seção 2 (`DO2`) concentra a
 > maior parte dos atos de pessoal (nomeações, exonerações, concursos).
+
+> A checagem de convocações só roda se **ambos** `ORGAOS_BUSCA` e
+> `TIPOS_ATO` tiverem algum valor. Um documento só conta como
+> convocação/nomeação se tiver pelo menos um termo de cada lista ao mesmo
+> tempo — isso evita falso positivo (ex.: nomeação de outro órgão).
 
 ## Rodar manualmente
 
@@ -188,15 +214,18 @@ schtasks /Delete /TN "AgenteINLABS_BuscaNome" /F
 
 ## Onde ficam os resultados
 
-- **`relatorios/AAAA-MM-DD.txt`** — um relatório por dia rodado, mesmo sem
-  ocorrências. Contém seção, arquivo, nome encontrado, um trecho de contexto
-  e o **texto completo** de cada matéria onde o nome apareceu.
-- **`relatorios/AAAA-MM-DD.html`** — mesma informação, só que formatada:
-  abre no navegador (dois cliques), com o nome destacado em amarelo dentro
-  do texto e tema claro/escuro automático.
-- **Notificação do Windows** — aparece automaticamente só quando há
-  ocorrência, com som de alerta e **fica fixa na tela até você clicar para
-  dispensar** (não some sozinha).
+- **`relatorios/nome/AAAA-MM-DD.txt`** e **`.html`** — resultado da busca
+  por nome, um relatório por dia (mesmo sem ocorrências). Contém seção,
+  arquivo, nome encontrado, um trecho de contexto e o **texto completo**
+  de cada matéria. O `.html` destaca o nome em amarelo e tem tema
+  claro/escuro automático.
+- **`relatorios/convocacoes/AAAA-MM-DD.txt`** e **`.html`** — resultado da
+  checagem de convocações/nomeações (se ativada), mesmo formato.
+- **`relatorios/falhas.log`** — falhas de execução (sem internet, site em
+  manutenção etc.), sem gerar alarme falso.
+- **Notificação do Windows** — uma para cada checagem que encontrar algo
+  (podem disparar as duas juntas ou só uma), com som de alerta, **fixa na
+  tela até você clicar para dispensar**.
 - **`downloads/`** — pasta de trabalho temporária; fica vazia entre
   execuções (os arquivos baixados do INLABS são apagados ao final).
 
@@ -207,12 +236,15 @@ INLABS-SEARCH/
 ├── .env                      ← suas configurações pessoais (não versionado)
 ├── .env.example               ← modelo do .env, sem dados reais
 ├── config.py                  ← carrega o .env, sem dados pessoais
-├── buscar_nome_dou.py         ← script principal
+├── buscar_nome_dou.py         ← script principal (as duas checagens)
 ├── configurar_horario.bat     ← configurar/remover o agendamento diário
 ├── ativar_inicializacao.bat   ← ativar execução ao ligar o PC
 ├── remover_inicializacao.bat  ← desativar execução ao ligar o PC
 ├── requirements.txt           ← dependências Python
-├── relatorios/                ← relatórios gerados (um .txt por dia)
+├── relatorios/
+│   ├── nome/                  ← relatórios da busca por nome (um .txt/.html por dia)
+│   ├── convocacoes/           ← relatórios da checagem de convocações (idem)
+│   └── falhas.log             ← falhas de execução
 └── downloads/                 ← pasta de trabalho temporária
 ```
 
@@ -239,6 +271,11 @@ incompleto. Como a tarefa roda de hora em hora e só "desiste" quando já
 teve sucesso naquele dia, ele **tenta de novo automaticamente na próxima
 hora**, sem precisar de nenhuma ação manual. Se só uma seção (DO1/DO2/DO3)
 falhar por conexão, as outras continuam sendo verificadas normalmente.
+
+O script também reconhece a página de manutenção do INLABS (quando o site
+volta um "Sistema em Manutenção" em vez do conteúdo esperado) e registra
+isso com uma mensagem específica no log, em vez do erro genérico de
+login.
 
 **"Falha ao obter cookie de sessão do INLABS"**
 E-mail ou senha errados no `.env`. Confira em https://inlabs.in.gov.br se o

@@ -1,17 +1,26 @@
 """
 Agente de busca no Diário Oficial da União (INLABS).
 
-Baixa as edições do dia (seções configuradas em config.py), varre o texto
-de todas as matérias publicadas e avisa (notificação do Windows + relatório
-em arquivo) quando encontra os nomes configurados em NOMES_BUSCA.
+Baixa as edições do dia (seções configuradas em config.py) e faz DUAS
+checagens independentes sobre o mesmo conteúdo baixado (um único
+login/download serve para as duas):
+
+  1. Busca por nome (NOMES_BUSCA) em qualquer publicação — relatório e
+     notificação em relatorios/nome/.
+  2. (Opcional) Busca por convocação/nomeação de um órgão específico
+     (ORGAOS_BUSCA + TIPOS_ATO, ex.: IFAM) — de qualquer candidato, não
+     só o seu nome — relatório e notificação em relatorios/convocacoes/.
+     Desativada se ORGAOS_BUSCA/TIPOS_ATO estiverem vazios no .env.
 
 Uso manual:
     python buscar_nome_dou.py                        (hoje)
     python buscar_nome_dou.py AAAA-MM-DD              (um dia específico)
     python buscar_nome_dou.py AAAA-MM-DD AAAA-MM-DD   (intervalo de datas, inclusive)
 
-Sem argumento, usa a data de hoje. Pensado para também ser chamado
-automaticamente todo dia pelo Agendador de Tarefas do Windows (ver README.md).
+Sem argumento, usa a data de hoje. Se já houver relatório de sucesso de
+hoje, a execução automática não repete o processo (só faz login/download
+de novo se a tentativa anterior tiver falhado). Pensado para rodar de
+hora em hora pelo Agendador de Tarefas do Windows (ver README.md).
 """
 
 import html
@@ -26,11 +35,21 @@ from xml.etree import ElementTree as ET
 
 import requests
 
-from config import INLABS_EMAIL, INLABS_SENHA, NOMES_BUSCA, SECOES_DOU
+from config import (
+    CONVOCACOES_ATIVADO,
+    INLABS_EMAIL,
+    INLABS_SENHA,
+    NOMES_BUSCA,
+    ORGAOS_BUSCA,
+    SECOES_DOU,
+    TIPOS_ATO,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 RELATORIOS_DIR = BASE_DIR / "relatorios"
+RELATORIOS_NOME_DIR = RELATORIOS_DIR / "nome"
+RELATORIOS_CONVOCACOES_DIR = RELATORIOS_DIR / "convocacoes"
 
 URL_LOGIN = "https://inlabs.in.gov.br/logar.php"
 URL_DOWNLOAD = "https://inlabs.in.gov.br/index.php?p="
@@ -66,7 +85,11 @@ def login(sessao: requests.Session) -> str:
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    sessao.request("POST", URL_LOGIN, data=payload, headers=headers, timeout=30)
+    resposta = sessao.request("POST", URL_LOGIN, data=payload, headers=headers, timeout=30)
+    if "manuten" in resposta.text.lower() and not sessao.cookies.get("inlabs_session_cookie"):
+        raise RuntimeError(
+            "O site do INLABS está em manutenção no momento. Tente de novo mais tarde."
+        )
     cookie = sessao.cookies.get("inlabs_session_cookie")
     if not cookie:
         raise RuntimeError(
@@ -93,6 +116,8 @@ def baixar_secoes(sessao: requests.Session, cookie: str, data_completa: str, des
             caminho_zip.write_bytes(resposta.content)
             arquivos_baixados.append(caminho_zip)
             print(f"Baixado: {nome_arquivo}")
+        elif resposta.status_code == 200 and b"manuten" in resposta.content[:2000].lower():
+            print(f"INLABS em manutenção ao tentar baixar {secao} ({data_completa}).")
         else:
             print(f"Sem edição disponível para {secao} ({data_completa}): HTTP {resposta.status_code}")
     return arquivos_baixados
@@ -108,8 +133,29 @@ def trecho_contexto(texto: str, termo_normalizado: str, janela: int = 120) -> st
     return "..." + texto[inicio:fim].replace("\n", " ").strip() + "..."
 
 
-def buscar_em_zip(caminho_zip: Path, secao: str) -> list[dict]:
-    ocorrencias = []
+def classificar_convocacao(texto: str) -> dict | None:
+    """Retorna os termos casados (órgão + tipo de ato) se o texto for uma
+    convocação/nomeação de ORGAOS_BUSCA, ou None se não for."""
+    texto_norm = normalizar(texto)
+
+    orgao_casado = next((o for o in ORGAOS_BUSCA if normalizar(o) in texto_norm), None)
+    if not orgao_casado:
+        return None
+
+    tipo_casado = next((t for t in TIPOS_ATO if normalizar(t) in texto_norm), None)
+    if not tipo_casado:
+        return None
+
+    return {"orgao": orgao_casado, "tipo_ato": tipo_casado}
+
+
+def buscar_em_zip(caminho_zip: Path, secao: str) -> dict[str, list[dict]]:
+    """Varre um zip uma única vez e roda as duas checagens (nome e
+    convocação) sobre o mesmo texto extraído — evita reprocessar o XML
+    duas vezes. Um erro numa checagem não afeta a outra."""
+    ocorrencias_nome: list[dict] = []
+    ocorrencias_convocacao: list[dict] = []
+
     with zipfile.ZipFile(caminho_zip) as z:
         for nome_interno in z.namelist():
             if not nome_interno.lower().endswith(".xml"):
@@ -124,27 +170,56 @@ def buscar_em_zip(caminho_zip: Path, secao: str) -> list[dict]:
             texto = "\n".join(partes)
             texto_norm = normalizar(texto)
             atributos = dict(raiz.attrib)
+            titulo = atributos.get("name") or atributos.get("title") or nome_interno
+            identifica = atributos.get("idOficio") or atributos.get("numeroDou") or ""
 
-            for nome_busca in NOMES_BUSCA:
-                termo = normalizar(nome_busca)
-                if termo in texto_norm:
-                    ocorrencias.append(
-                        {
-                            "secao": secao,
-                            "arquivo": nome_interno,
-                            "nome_buscado": nome_busca,
-                            "titulo": atributos.get("name") or atributos.get("title") or nome_interno,
-                            "identifica": atributos.get("idOficio") or atributos.get("numeroDou") or "",
-                            "trecho": trecho_contexto(texto, termo),
-                            "texto_completo": texto,
-                        }
-                    )
-    return ocorrencias
+            try:
+                for nome_busca in NOMES_BUSCA:
+                    termo = normalizar(nome_busca)
+                    if termo in texto_norm:
+                        ocorrencias_nome.append(
+                            {
+                                "secao": secao,
+                                "arquivo": nome_interno,
+                                "nome_buscado": nome_busca,
+                                "titulo": titulo,
+                                "identifica": identifica,
+                                "trecho": trecho_contexto(texto, termo),
+                                "texto_completo": texto,
+                            }
+                        )
+            except Exception as exc:  # isola a checagem de nome da de convocação
+                print(f"(Aviso: erro na checagem de nome em {nome_interno}: {exc})")
+
+            if CONVOCACOES_ATIVADO:
+                try:
+                    resultado = classificar_convocacao(texto)
+                    if resultado:
+                        ocorrencias_convocacao.append(
+                            {
+                                "secao": secao,
+                                "arquivo": nome_interno,
+                                "orgao": resultado["orgao"],
+                                "tipo_ato": resultado["tipo_ato"],
+                                "titulo": titulo,
+                                "identifica": identifica,
+                                "trecho": trecho_contexto(texto, normalizar(resultado["tipo_ato"])),
+                                "texto_completo": texto,
+                            }
+                        )
+                except Exception as exc:  # isola a checagem de convocação da de nome
+                    print(f"(Aviso: erro na checagem de convocação em {nome_interno}: {exc})")
+
+    return {"nome": ocorrencias_nome, "convocacoes": ocorrencias_convocacao}
 
 
-def gerar_relatorio(data_completa: str, ocorrencias: list[dict]) -> Path:
-    RELATORIOS_DIR.mkdir(parents=True, exist_ok=True)
-    caminho_relatorio = RELATORIOS_DIR / f"{data_completa}.txt"
+# ---------------------------------------------------------------------------
+# Relatórios: busca por nome
+# ---------------------------------------------------------------------------
+
+def gerar_relatorio_nome(data_completa: str, ocorrencias: list[dict]) -> Path:
+    RELATORIOS_NOME_DIR.mkdir(parents=True, exist_ok=True)
+    caminho_relatorio = RELATORIOS_NOME_DIR / f"{data_completa}.txt"
     linhas = [f"Relatório de busca no DOU - {data_completa}", "=" * 50, ""]
     if not ocorrencias:
         linhas.append("Nenhuma ocorrência encontrada nas seções: " + ", ".join(SECOES_DOU))
@@ -173,37 +248,13 @@ def destacar_nome(texto_limpo: str, nome_busca: str) -> str:
     return padrao.sub(lambda m: f"<mark>{m.group(0)}</mark>", texto_escapado)
 
 
-def gerar_relatorio_html(data_completa: str, ocorrencias: list[dict]) -> Path:
-    RELATORIOS_DIR.mkdir(parents=True, exist_ok=True)
-    caminho_relatorio = RELATORIOS_DIR / f"{data_completa}.html"
-
-    if not ocorrencias:
-        corpo = (
-            '<p class="vazio">Nenhuma ocorrência encontrada nas seções: '
-            f'{html.escape(", ".join(SECOES_DOU))}.</p>'
-        )
-    else:
-        blocos = []
-        for i, oc in enumerate(ocorrencias, 1):
-            titulo_linha = html.escape(f"{oc['titulo']} {oc['identifica']}".strip())
-            paragrafos_html = "".join(
-                f"<p>{destacar_nome(p, oc['nome_buscado'])}</p>"
-                for p in paragrafos(limpar_html(oc["texto_completo"]))
-            )
-            blocos.append(f"""
-    <article class="ocorrencia">
-      <h2>[{i}] Seção {html.escape(oc['secao'])} <span class="arquivo">{html.escape(oc['arquivo'])}</span></h2>
-      <p class="meta"><strong>Nome buscado:</strong> {html.escape(oc['nome_buscado'])}</p>
-      <p class="meta"><strong>Título/identificação:</strong> {titulo_linha}</p>
-      <div class="texto-dou">{paragrafos_html}</div>
-    </article>""")
-        corpo = f'<p class="resumo">{len(ocorrencias)} ocorrência(s) encontrada(s).</p>' + "".join(blocos)
-
-    html_final = f"""<!doctype html>
+def _pagina_html(titulo_pagina: str, subtitulo: str, corpo: str) -> str:
+    """Template HTML compartilhado pelos dois tipos de relatório."""
+    return f"""<!doctype html>
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
-<title>Relatório DOU - {data_completa}</title>
+<title>{html.escape(titulo_pagina)}</title>
 <style>
   :root {{
     color-scheme: light dark;
@@ -278,13 +329,116 @@ def gerar_relatorio_html(data_completa: str, ocorrencias: list[dict]) -> Path:
 </style>
 </head>
 <body>
-  <h1>Relatório de busca no DOU</h1>
-  <p class="subtitulo">Data: {data_completa}</p>
+  <h1>{html.escape(titulo_pagina)}</h1>
+  <p class="subtitulo">{html.escape(subtitulo)}</p>
   {corpo}
 </body>
 </html>
 """
-    caminho_relatorio.write_text(html_final, encoding="utf-8")
+
+
+def gerar_relatorio_nome_html(data_completa: str, ocorrencias: list[dict]) -> Path:
+    RELATORIOS_NOME_DIR.mkdir(parents=True, exist_ok=True)
+    caminho_relatorio = RELATORIOS_NOME_DIR / f"{data_completa}.html"
+
+    if not ocorrencias:
+        corpo = (
+            '<p class="vazio">Nenhuma ocorrência encontrada nas seções: '
+            f'{html.escape(", ".join(SECOES_DOU))}.</p>'
+        )
+    else:
+        blocos = []
+        for i, oc in enumerate(ocorrencias, 1):
+            titulo_linha = html.escape(f"{oc['titulo']} {oc['identifica']}".strip())
+            paragrafos_html = "".join(
+                f"<p>{destacar_nome(p, oc['nome_buscado'])}</p>"
+                for p in paragrafos(limpar_html(oc["texto_completo"]))
+            )
+            blocos.append(f"""
+    <article class="ocorrencia">
+      <h2>[{i}] Seção {html.escape(oc['secao'])} <span class="arquivo">{html.escape(oc['arquivo'])}</span></h2>
+      <p class="meta"><strong>Nome buscado:</strong> {html.escape(oc['nome_buscado'])}</p>
+      <p class="meta"><strong>Título/identificação:</strong> {titulo_linha}</p>
+      <div class="texto-dou">{paragrafos_html}</div>
+    </article>""")
+        corpo = f'<p class="resumo">{len(ocorrencias)} ocorrência(s) encontrada(s).</p>' + "".join(blocos)
+
+    caminho_relatorio.write_text(
+        _pagina_html("Relatório de busca no DOU", f"Data: {data_completa}", corpo),
+        encoding="utf-8",
+    )
+    return caminho_relatorio
+
+
+# ---------------------------------------------------------------------------
+# Relatórios: convocações/nomeações de um órgão específico
+# ---------------------------------------------------------------------------
+
+def gerar_relatorio_convocacoes(data_completa: str, ocorrencias: list[dict]) -> Path:
+    RELATORIOS_CONVOCACOES_DIR.mkdir(parents=True, exist_ok=True)
+    caminho_relatorio = RELATORIOS_CONVOCACOES_DIR / f"{data_completa}.txt"
+    linhas = [f"Relatório de convocações/nomeações - {data_completa}", "=" * 50, ""]
+    if not ocorrencias:
+        linhas.append("Nenhuma convocação/nomeação encontrada nas seções: " + ", ".join(SECOES_DOU))
+    else:
+        linhas.append(f"{len(ocorrencias)} documento(s) encontrado(s):\n")
+        for i, oc in enumerate(ocorrencias, 1):
+            linhas.append(f"[{i}] Seção {oc['secao']} - {oc['arquivo']}")
+            linhas.append(f"    Órgão: {oc['orgao']}")
+            linhas.append(f"    Tipo de ato: {oc['tipo_ato']}")
+            titulo_linha = f"{oc['titulo']} {oc['identifica']}".strip()
+            linhas.append(f"    Título/identificação: {titulo_linha}")
+            linhas.append(f"    Trecho: {oc['trecho']}")
+            linhas.append("    Texto completo da matéria:")
+            linhas.append("    " + "-" * 46)
+            for linha_texto in limpar_html(oc["texto_completo"]).splitlines():
+                linhas.append(f"    {linha_texto}")
+            linhas.append("    " + "-" * 46)
+            linhas.append("")
+    caminho_relatorio.write_text("\n".join(linhas), encoding="utf-8")
+    return caminho_relatorio
+
+
+def destacar_termos(texto_limpo: str, termos: list[str]) -> str:
+    """Escapa o HTML e envolve as ocorrências de vários termos em <mark>."""
+    texto_escapado = html.escape(texto_limpo)
+    for termo in termos:
+        padrao = re.compile(re.escape(html.escape(termo)), re.IGNORECASE)
+        texto_escapado = padrao.sub(lambda m: f"<mark>{m.group(0)}</mark>", texto_escapado)
+    return texto_escapado
+
+
+def gerar_relatorio_convocacoes_html(data_completa: str, ocorrencias: list[dict]) -> Path:
+    RELATORIOS_CONVOCACOES_DIR.mkdir(parents=True, exist_ok=True)
+    caminho_relatorio = RELATORIOS_CONVOCACOES_DIR / f"{data_completa}.html"
+
+    if not ocorrencias:
+        corpo = (
+            '<p class="vazio">Nenhuma convocação/nomeação encontrada nas seções: '
+            f'{html.escape(", ".join(SECOES_DOU))}.</p>'
+        )
+    else:
+        blocos = []
+        for i, oc in enumerate(ocorrencias, 1):
+            titulo_linha = html.escape(f"{oc['titulo']} {oc['identifica']}".strip())
+            paragrafos_html = "".join(
+                f"<p>{destacar_termos(p, [oc['orgao'], oc['tipo_ato']])}</p>"
+                for p in paragrafos(limpar_html(oc["texto_completo"]))
+            )
+            blocos.append(f"""
+    <article class="ocorrencia">
+      <h2>[{i}] Seção {html.escape(oc['secao'])} <span class="arquivo">{html.escape(oc['arquivo'])}</span></h2>
+      <p class="meta"><strong>Órgão:</strong> {html.escape(oc['orgao'])}</p>
+      <p class="meta"><strong>Tipo de ato:</strong> {html.escape(oc['tipo_ato'])}</p>
+      <p class="meta"><strong>Título/identificação:</strong> {titulo_linha}</p>
+      <div class="texto-dou">{paragrafos_html}</div>
+    </article>""")
+        corpo = f'<p class="resumo">{len(ocorrencias)} documento(s) encontrado(s).</p>' + "".join(blocos)
+
+    caminho_relatorio.write_text(
+        _pagina_html("Convocações/Nomeações", f"Data: {data_completa}", corpo),
+        encoding="utf-8",
+    )
     return caminho_relatorio
 
 
@@ -298,7 +452,7 @@ def registrar_falha(motivo: str) -> Path:
     return caminho
 
 
-def notificar_windows(titulo: str, mensagem: str):
+def notificar_windows(titulo: str, mensagem: str, app_id: str = "Agente INLABS"):
     try:
         import winotify
         from winotify import Notification, audio
@@ -312,7 +466,7 @@ def notificar_windows(titulo: str, mensagem: str):
             )
 
         toast = Notification(
-            app_id="Agente INLABS",
+            app_id=app_id,
             title=titulo,
             msg=mensagem,
             duration="long",
@@ -325,8 +479,9 @@ def notificar_windows(titulo: str, mensagem: str):
         print(f"(Aviso: não foi possível exibir notificação do Windows: {exc})")
 
 
-def processar_dia(sessao: requests.Session, cookie: str, data_completa: str) -> list[dict]:
-    """Baixa, varre e gera o relatório de um único dia. Retorna as ocorrências encontradas.
+def processar_dia(sessao: requests.Session, cookie: str, data_completa: str) -> dict[str, list[dict]]:
+    """Baixa, varre e gera os relatórios de um único dia (nome e, se
+    ativado, convocações). Retorna {"nome": [...], "convocacoes": [...]}.
 
     Erros inesperados aqui (zip corrompido, etc.) não derrubam o processamento
     dos outros dias de um intervalo — ficam registrados em falhas.log."""
@@ -337,38 +492,53 @@ def processar_dia(sessao: requests.Session, cookie: str, data_completa: str) -> 
         registrar_falha(f"[{data_completa}] falha de conexão ao baixar seções: {exc}")
         print(f"[{data_completa}] Falha de conexão, pulando este dia.")
         shutil.rmtree(destino_dia, ignore_errors=True)
-        return []
+        return {"nome": [], "convocacoes": []}
 
     if not arquivos:
         print(f"[{data_completa}] Nenhum arquivo disponível (sem edição publicada nesse dia).")
-        gerar_relatorio(data_completa, [])
-        gerar_relatorio_html(data_completa, [])
+        gerar_relatorio_nome(data_completa, [])
+        gerar_relatorio_nome_html(data_completa, [])
+        if CONVOCACOES_ATIVADO:
+            gerar_relatorio_convocacoes(data_completa, [])
+            gerar_relatorio_convocacoes_html(data_completa, [])
         shutil.rmtree(destino_dia, ignore_errors=True)
-        return []
+        return {"nome": [], "convocacoes": []}
 
-    todas_ocorrencias = []
+    ocorrencias_nome: list[dict] = []
+    ocorrencias_convocacao: list[dict] = []
     for caminho_zip in arquivos:
         secao = caminho_zip.stem.split("-")[-1]
         print(f"[{data_completa}] Varrendo {caminho_zip.name}...")
         try:
-            todas_ocorrencias.extend(buscar_em_zip(caminho_zip, secao))
+            resultado = buscar_em_zip(caminho_zip, secao)
+            ocorrencias_nome.extend(resultado["nome"])
+            ocorrencias_convocacao.extend(resultado["convocacoes"])
         except zipfile.BadZipFile as exc:
             registrar_falha(f"[{data_completa}] arquivo {caminho_zip.name} corrompido/incompleto: {exc}")
             print(f"[{data_completa}] Aviso: {caminho_zip.name} parece corrompido, pulando esse arquivo.")
 
-    relatorio = gerar_relatorio(data_completa, todas_ocorrencias)
-    relatorio_html = gerar_relatorio_html(data_completa, todas_ocorrencias)
-    print(f"[{data_completa}] Relatório salvo em: {relatorio}")
-    print(f"[{data_completa}] Relatório (HTML) salvo em: {relatorio_html}")
-
-    if todas_ocorrencias:
-        print(f"[{data_completa}] {len(todas_ocorrencias)} ocorrência(s) encontrada(s).")
+    relatorio = gerar_relatorio_nome(data_completa, ocorrencias_nome)
+    relatorio_html = gerar_relatorio_nome_html(data_completa, ocorrencias_nome)
+    print(f"[{data_completa}] Relatório (nome) salvo em: {relatorio}")
+    print(f"[{data_completa}] Relatório (nome, HTML) salvo em: {relatorio_html}")
+    if ocorrencias_nome:
+        print(f"[{data_completa}] {len(ocorrencias_nome)} ocorrência(s) de nome encontrada(s).")
     else:
         print(f"[{data_completa}] Nenhuma ocorrência do(s) nome(s) configurado(s).")
 
-    # limpa os arquivos baixados (zips), o relatório já guarda o essencial
+    if CONVOCACOES_ATIVADO:
+        relatorio_c = gerar_relatorio_convocacoes(data_completa, ocorrencias_convocacao)
+        relatorio_c_html = gerar_relatorio_convocacoes_html(data_completa, ocorrencias_convocacao)
+        print(f"[{data_completa}] Relatório (convocações) salvo em: {relatorio_c}")
+        print(f"[{data_completa}] Relatório (convocações, HTML) salvo em: {relatorio_c_html}")
+        if ocorrencias_convocacao:
+            print(f"[{data_completa}] {len(ocorrencias_convocacao)} convocação(ões)/nomeação(ões) encontrada(s).")
+        else:
+            print(f"[{data_completa}] Nenhuma convocação/nomeação encontrada.")
+
+    # limpa os arquivos baixados (zips), os relatórios já guardam o essencial
     shutil.rmtree(destino_dia, ignore_errors=True)
-    return todas_ocorrencias
+    return {"nome": ocorrencias_nome, "convocacoes": ocorrencias_convocacao}
 
 
 def intervalo_de_datas(data_inicio: str, data_fim: str) -> list[str]:
@@ -386,7 +556,11 @@ def intervalo_de_datas(data_inicio: str, data_fim: str) -> list[str]:
 
 def ja_verificado_hoje(data_completa: str) -> bool:
     """Já existe relatório de sucesso para essa data (gerado só quando o dia foi processado)."""
-    return (RELATORIOS_DIR / f"{data_completa}.txt").exists()
+    nome_ok = (RELATORIOS_NOME_DIR / f"{data_completa}.txt").exists()
+    if not CONVOCACOES_ATIVADO:
+        return nome_ok
+    convocacoes_ok = (RELATORIOS_CONVOCACOES_DIR / f"{data_completa}.txt").exists()
+    return nome_ok and convocacoes_ok
 
 
 def main():
@@ -417,30 +591,55 @@ def main():
         print(str(exc))
         return
 
-    ocorrencias_por_dia = {}
+    resultados_por_dia = {}
     for data_completa in datas:
-        ocorrencias_por_dia[data_completa] = processar_dia(sessao, cookie, data_completa)
+        resultados_por_dia[data_completa] = processar_dia(sessao, cookie, data_completa)
 
-    total_ocorrencias = sum(len(v) for v in ocorrencias_por_dia.values())
-    dias_com_ocorrencia = [d for d, v in ocorrencias_por_dia.items() if v]
+    # --- resumo e notificação: busca por nome ---
+    ocorrencias_nome_todas = {d: r["nome"] for d, r in resultados_por_dia.items()}
+    total_nome = sum(len(v) for v in ocorrencias_nome_todas.values())
+    dias_com_nome = [d for d, v in ocorrencias_nome_todas.items() if v]
 
     if len(datas) > 1:
-        print(f"\nResumo: {total_ocorrencias} ocorrência(s) em {len(dias_com_ocorrencia)} dia(s) de {len(datas)} pesquisado(s).")
-        if dias_com_ocorrencia:
-            print("Dias com ocorrência: " + ", ".join(dias_com_ocorrencia))
+        print(f"\nResumo (nome): {total_nome} ocorrência(s) em {len(dias_com_nome)} dia(s) de {len(datas)} pesquisado(s).")
+        if dias_com_nome:
+            print("Dias com ocorrência: " + ", ".join(dias_com_nome))
 
-    if total_ocorrencias:
+    if total_nome:
         nomes = ", ".join(sorted({
-            oc["nome_buscado"] for ocorrencias in ocorrencias_por_dia.values() for oc in ocorrencias
+            oc["nome_buscado"] for ocorrencias in ocorrencias_nome_todas.values() for oc in ocorrencias
         }))
         if len(datas) == 1:
-            mensagem = f"{total_ocorrencias} ocorrência(s) de '{nomes}' em {datas[0]}. Veja o relatório."
+            mensagem = f"{total_nome} ocorrência(s) de '{nomes}' em {datas[0]}. Veja o relatório."
         else:
             mensagem = (
-                f"{total_ocorrencias} ocorrência(s) de '{nomes}' em {len(dias_com_ocorrencia)} dia(s) "
+                f"{total_nome} ocorrência(s) de '{nomes}' em {len(dias_com_nome)} dia(s) "
                 f"({datas[0]} a {datas[-1]}). Veja os relatórios."
             )
         notificar_windows("Seu nome apareceu no Diário Oficial!", mensagem)
+
+    # --- resumo e notificação: convocações/nomeações ---
+    if CONVOCACOES_ATIVADO:
+        ocorrencias_conv_todas = {d: r["convocacoes"] for d, r in resultados_por_dia.items()}
+        total_conv = sum(len(v) for v in ocorrencias_conv_todas.values())
+        dias_com_conv = [d for d, v in ocorrencias_conv_todas.items() if v]
+
+        if len(datas) > 1:
+            print(f"Resumo (convocações): {total_conv} documento(s) em {len(dias_com_conv)} dia(s) de {len(datas)} pesquisado(s).")
+            if dias_com_conv:
+                print("Dias com convocação/nomeação: " + ", ".join(dias_com_conv))
+
+        if total_conv:
+            if len(datas) == 1:
+                mensagem = f"{total_conv} convocação(ões)/nomeação(ões) em {datas[0]}. Veja o relatório."
+            else:
+                mensagem = (
+                    f"{total_conv} convocação(ões)/nomeação(ões) em {len(dias_com_conv)} dia(s) "
+                    f"({datas[0]} a {datas[-1]}). Veja os relatórios."
+                )
+            notificar_windows(
+                "Convocação/nomeação publicada no DOU!", mensagem, app_id="Agente INLABS Convocações"
+            )
 
 
 if __name__ == "__main__":
